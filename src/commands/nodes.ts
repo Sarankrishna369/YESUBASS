@@ -11,6 +11,9 @@ export default {
         const player = client.players.get(interaction.guildId!);
         const activeNodeName = player?.player.node.name;
 
+        console.log(`[NODES COMMAND] Shoukaku node count: ${nodes.size}`);
+        console.log(`[NODES COMMAND] node names: ${Array.from(nodes.values()).map((n) => n.name).join(', ')}`);
+
         const embed = new EmbedBuilder()
             .setTitle('📡 Lavalink Nodes Status')
             .setColor('#2F3136')

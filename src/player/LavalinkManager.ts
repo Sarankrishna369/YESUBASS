@@ -15,6 +15,10 @@ export class LavalinkManager {
         }));
         console.log(`[LAVALINK CONFIG] Node count: ${config.lavalink.length}`);
         console.log(`[LAVALINK CONFIG] Node names: ${config.lavalink.map(n => n.name).join(', ')}`);
+        
+        console.log('[SHOUKAKU INIT] Input node count:', nodes.length);
+        console.log('[SHOUKAKU INIT] Input node names:', nodes.map(n => n.name).join(', '));
+        console.log('[SHOUKAKU INIT] Node URLs:', nodes.map(n => n.url).join(', '));
 
         this.shoukaku = new Shoukaku(new Connectors.DiscordJS(client), nodes, {
             moveOnDisconnect: true,
@@ -43,11 +47,12 @@ export class LavalinkManager {
             }
         });
 
-        console.log(`[SHOUKAKU] Node count: ${this.shoukaku.nodes.size}`);
-        console.log(`[SHOUKAKU] Node names: ${Array.from(this.shoukaku.nodes.values()).map(n => n.name).join(', ')}`);
+        console.log('[SHOUKAKU INIT] Internal node count (sync check):', this.shoukaku.nodes.size);
+        console.log('[SHOUKAKU INIT] Internal node names (sync check):', Array.from(this.shoukaku.nodes.values()).map(n => n.name).join(', '));
 
         this.shoukaku.on('ready', (name) => {
             logger.success(`Lavalink node ${name} emitted ready event (CONNECTED)!`);
+            console.log(`[SHOUKAKU LIFECYCLE] Node ${name} is now in shoukaku.nodes. Current size: ${this.shoukaku.nodes.size}`);
             
             // Recover players that were preserved during a connection drop
             for (const player of client.players.values()) {
@@ -67,6 +72,10 @@ export class LavalinkManager {
 
         this.shoukaku.on('disconnect', (name, count) => {
             logger.warn(`Lavalink node ${name} triggered disconnect event. Reconnected players moved: ${count}`);
+        });
+
+        this.shoukaku.on('debug', (name, info) => {
+            console.log(`[SHOUKAKU DEBUG] ${name}: ${info}`);
         });
 
         // Connection Watchdog

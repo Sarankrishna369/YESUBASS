@@ -31,10 +31,13 @@ if (nodesEnv && nodesEnv !== '[]' && nodesEnv !== 'null') {
         console.error(`\x1b[31m[CRITICAL ERROR] Missing LAVALINK_HOST and LAVALINK_PASSWORD environment variables.\x1b[0m`);
         process.exit(1);
     }
+    let host = process.env.LAVALINK_HOST;
+    host = host.replace(/^https?:\/\//, '').replace(/\/$/, '');
+
     lavalinkNodes = [
         {
             name: 'Node 1',
-            url: process.env.LAVALINK_HOST,
+            url: host,
             auth: process.env.LAVALINK_PASSWORD,
             secure: process.env.LAVALINK_SECURE === 'true',
         }
@@ -47,7 +50,13 @@ if (lavalinkNodes.length === 0) {
 }
 
 const configuredNodesStr = lavalinkNodes.map((n) => n.name).join(', ');
-console.log(`Configured Lavalink nodes: ${configuredNodesStr}`);
+console.log(`LAVALINK_NODES present: ${!!process.env.LAVALINK_NODES}`);
+console.log(`LAVALINK_NODES length: ${process.env.LAVALINK_NODES?.length || 0}`);
+console.log(`LAVALINK_HOST present: ${!!process.env.LAVALINK_HOST}`);
+console.log(`LAVALINK_PASSWORD present: ${!!process.env.LAVALINK_PASSWORD}`);
+console.log(`LAVALINK_SECURE: ${process.env.LAVALINK_SECURE}`);
+console.log(`Configured Lavalink node count: ${lavalinkNodes.length}`);
+console.log(`Configured Lavalink node names: ${configuredNodesStr}`);
 
 export const config = {
     bot: {

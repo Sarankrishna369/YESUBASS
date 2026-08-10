@@ -6,6 +6,9 @@ import { Mutex } from '../utils/Mutex';
 import { Node } from 'shoukaku';
 
 async function getLavalinkNode(client: YesubassClient, maxWaitMs = 10000): Promise<Node | undefined> {
+    console.log(`[PLAY COMMAND] node count: ${client.lavalink.shoukaku.nodes.size}`);
+    console.log(`[PLAY COMMAND] node names: ${Array.from(client.lavalink.shoukaku.nodes.values()).map((n) => n.name).join(', ')}`);
+    console.log(`[PLAY COMMAND] native node.state values: ${Array.from(client.lavalink.shoukaku.nodes.values()).map(n => n.state).join(', ')}`);
     let node = client.lavalink.shoukaku.options.nodeResolver(client.lavalink.shoukaku.nodes);
     if (node) return node;
 
