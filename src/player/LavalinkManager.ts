@@ -13,6 +13,8 @@ export class LavalinkManager {
             auth: node.auth,
             secure: node.secure,
         }));
+        console.log(`[LAVALINK CONFIG] Node count: ${config.lavalink.length}`);
+        console.log(`[LAVALINK CONFIG] Node names: ${config.lavalink.map(n => n.name).join(', ')}`);
 
         this.shoukaku = new Shoukaku(new Connectors.DiscordJS(client), nodes, {
             moveOnDisconnect: true,
@@ -40,6 +42,9 @@ export class LavalinkManager {
                 return availableNodes.sort((a, b) => a.penalties - b.penalties)[0];
             }
         });
+
+        console.log(`[SHOUKAKU] Node count: ${this.shoukaku.nodes.size}`);
+        console.log(`[SHOUKAKU] Node names: ${Array.from(this.shoukaku.nodes.values()).map(n => n.name).join(', ')}`);
 
         this.shoukaku.on('ready', (name) => {
             logger.success(`Lavalink node ${name} emitted ready event (CONNECTED)!`);
