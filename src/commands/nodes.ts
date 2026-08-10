@@ -32,7 +32,7 @@ export default {
                 3: '🔴 Disconnected',
             };
             
-            const stateStr = stateEmojis[node.state] || '⚫ Unknown';
+            const stateStr = `${stateEmojis[node.state] || '⚫ Unknown'} (Raw State: ${node.state})`;
             const isActive = activeNodeName === node.name;
             const title = `${isActive ? '▶️ ' : ''}${node.name} ${isActive ? '(Active)' : ''}`;
             

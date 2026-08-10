@@ -51,6 +51,7 @@ export class LavalinkManager {
         console.log('[SHOUKAKU INIT] Internal node names (sync check):', Array.from(this.shoukaku.nodes.values()).map(n => n.name).join(', '));
 
         this.shoukaku.on('ready', (name) => {
+            console.log(`[LAVALINK READY] ${name}`);
             logger.success(`Lavalink node ${name} emitted ready event (CONNECTED)!`);
             console.log(`[SHOUKAKU LIFECYCLE] Node ${name} is now in shoukaku.nodes. Current size: ${this.shoukaku.nodes.size}`);
             
@@ -63,19 +64,23 @@ export class LavalinkManager {
         });
 
         this.shoukaku.on('error', (name, error) => {
+            console.log(`[LAVALINK ERROR] ${name}: ${error.message || error}`);
             logger.error(`Lavalink node ${name} encountered an error:`, error);
         });
 
         this.shoukaku.on('close', (name, code, reason) => {
+            console.log(`[LAVALINK CLOSE] ${name} code=${code} reason=${reason || 'No reason'}`);
             logger.warn(`Lavalink node ${name} closed websocket with code ${code}. Reason: ${reason || 'No reason'}`);
         });
 
         this.shoukaku.on('disconnect', (name, count) => {
+            console.log(`[LAVALINK DISCONNECT] ${name}`);
             logger.warn(`Lavalink node ${name} triggered disconnect event. Reconnected players moved: ${count}`);
         });
 
         this.shoukaku.on('debug', (name, info) => {
-            console.log(`[SHOUKAKU DEBUG] ${name}: ${info}`);
+            console.log(`[LAVALINK DEBUG] ${name}: ${info}`);
+            // console.log(`[SHOUKAKU DEBUG] ${name}: ${info}`);
         });
 
         // Connection Watchdog

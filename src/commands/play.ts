@@ -5,6 +5,16 @@ import { logger } from '../utils/logger';
 import { Mutex } from '../utils/Mutex';
 import { Node } from 'shoukaku';
 
+function logPlayNodeCheck(client: YesubassClient) {
+    console.log('[PLAY NODE CHECK]');
+    console.log(`Shoukaku node count: ${client.lavalink.shoukaku.nodes.size}`);
+    for (const n of client.lavalink.shoukaku.nodes.values()) {
+        console.log(`[PLAY NODE CHECK] Node: ${n.name} | state: ${n.state} | penalties: ${n.penalties || 0}`);
+    }
+    const res = client.lavalink.shoukaku.options.nodeResolver(client.lavalink.shoukaku.nodes);
+    console.log(`[PLAY NODE CHECK] nodeResolver returned: ${res ? res.name : 'undefined'}`);
+}
+
 async function getLavalinkNode(client: YesubassClient, maxWaitMs = 10000): Promise<Node | undefined> {
     console.log(`[PLAY COMMAND] node count: ${client.lavalink.shoukaku.nodes.size}`);
     console.log(`[PLAY COMMAND] node names: ${Array.from(client.lavalink.shoukaku.nodes.values()).map((n) => n.name).join(', ')}`);
@@ -20,11 +30,21 @@ async function getLavalinkNode(client: YesubassClient, maxWaitMs = 10000): Promi
     }
 
     logger.info('Lavalink nodes are currently connecting/reconnecting. Waiting up to 10 seconds...');
+    console.log('[PLAY WAIT] Starting');
     const start = Date.now();
+    let attempt = 1;
     while (Date.now() - start < maxWaitMs) {
+        console.log(`[PLAY WAIT] attempt ${attempt}`);
+        console.log(`[PLAY WAIT] node count: ${client.lavalink.shoukaku.nodes.size}`);
+        const n1 = Array.from(client.lavalink.shoukaku.nodes.values()).find(n => n.name === 'Node 1');
+        console.log(`[PLAY WAIT] Node 1 state: ${n1 ? n1.state : 'undefined'}`);
+        
         await new Promise(r => setTimeout(r, 1000));
         node = client.lavalink.shoukaku.options.nodeResolver(client.lavalink.shoukaku.nodes);
+        console.log(`[PLAY WAIT] resolver result: ${node ? node.name : 'undefined'}`);
+        
         if (node) return node;
+        attempt++;
     }
     return undefined;
 }
@@ -69,6 +89,7 @@ export default {
                 if (!player) {
                     const node = await getLavalinkNode(client);
                     if (!node) {
+                        logPlayNodeCheck(client);
                         return interaction.followUp('❌ No Lavalink nodes are currently available.');
                     }
 
@@ -89,7 +110,10 @@ export default {
         }
 
         const node = await getLavalinkNode(client);
-        if (!node) return interaction.followUp('❌ No Lavalink nodes are currently available.');
+        if (!node) {
+            logPlayNodeCheck(client);
+            return interaction.followUp('❌ No Lavalink nodes are currently available.');
+        }
 
         let searchPrefix = 'ytsearch:';
         if (query.startsWith('http://') || query.startsWith('https://')) {
