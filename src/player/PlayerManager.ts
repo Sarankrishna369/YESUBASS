@@ -15,6 +15,9 @@ export class YesubassPlayer {
     public voiceChannelId: string;
     public leaveTimeout: NodeJS.Timeout | null = null;
     public processMutex: Mutex = new Mutex();
+    public lastPosition: number = 0;
+    public needsRecovery: boolean = false;
+    private isRecovering: boolean = false;
 
     constructor(client: YesubassClient, player: Player, guildId: string, textChannelId: string, voiceChannelId: string) {
         this.client = client;
@@ -35,6 +38,12 @@ export class YesubassPlayer {
             }
         });
 
+        this.player.on('update', (data: any) => {
+            if (data?.state?.position) {
+                this.lastPosition = data.state.position;
+            }
+        });
+
         this.player.on('end', async (_data) => {
             if (this.queue.loopTrack && this.queue.current) {
                 this.playTrack(this.queue.current);
@@ -49,8 +58,18 @@ export class YesubassPlayer {
             await this.playNext();
         });
 
-        this.player.on('closed', (_data) => {
+        this.player.on('closed', (_data: any) => {
             logger.warn(`Player closed in ${this.guildId}`, _data);
+            
+            // Only preserve if it's a confirmed Lavalink issue (abnormal closure)
+            const isLavalinkIssue = _data && (_data.code === 1006 || _data.reason === 'Node disconnected');
+            
+            if (isLavalinkIssue) {
+                logger.info(`Lavalink issue detected for ${this.guildId} (Code: ${_data?.code}). Preserving player state for recovery...`);
+                this.needsRecovery = true;
+                return;
+            }
+
             this.destroy();
         });
 
@@ -90,8 +109,40 @@ export class YesubassPlayer {
 
     public async destroy() {
         this.queue.clear();
+        this.lastPosition = 0;
         await this.client.lavalink.shoukaku.leaveVoiceChannel(this.guildId);
         this.client.players.delete(this.guildId);
+    }
+
+    public async recover() {
+        if (!this.queue.current) return;
+        if (this.isRecovering) {
+            logger.warn(`Recover already in progress for ${this.guildId}, skipping duplicate call.`);
+            return;
+        }
+        
+        this.isRecovering = true;
+        this.needsRecovery = false;
+        logger.info(`[RECOVERY START] Attempting to recover player for ${this.guildId}...`);
+        try {
+            const shoukakuPlayer = await this.client.lavalink.shoukaku.joinVoiceChannel({
+                guildId: this.guildId,
+                channelId: this.voiceChannelId,
+                shardId: 0
+            });
+            this.player = shoukakuPlayer;
+            this.setupEvents(); // Re-bind events to the new player instance
+            
+            logger.info(`[RECOVERY SUCCESS] Resuming track for ${this.guildId} at position ${this.lastPosition}ms`);
+            await this.player.playTrack({ 
+                track: { encoded: this.queue.current.track.encoded }, 
+                position: this.lastPosition 
+            });
+        } catch (err) {
+            logger.error(`[RECOVERY FAILURE] Failed to recover player for ${this.guildId}`, err);
+        } finally {
+            this.isRecovering = false;
+        }
     }
 
     private async sendMessage(content: string) {

@@ -22,14 +22,14 @@ export default {
         }
 
         nodes.forEach((node) => {
-            const stateMap: Record<number, string> = {
+            const stateEmojis: Record<number, string> = {
                 0: '🟡 Connecting',
                 1: '🟢 Connected',
                 2: '🟠 Disconnecting',
                 3: '🔴 Disconnected',
             };
             
-            const stateStr = stateMap[node.state] || '⚫ Unknown';
+            const stateStr = stateEmojis[node.state] || '⚫ Unknown';
             const isActive = activeNodeName === node.name;
             const title = `${isActive ? '▶️ ' : ''}${node.name} ${isActive ? '(Active)' : ''}`;
             
@@ -41,10 +41,13 @@ export default {
                 const memoryAllocated = (stats.memory.allocated / 1024 / 1024).toFixed(2);
                 const cpuSystem = (stats.cpu.systemLoad * 100).toFixed(2);
                 const cpuLava = (stats.cpu.lavalinkLoad * 100).toFixed(2);
+                const uptimeHrs = (stats.uptime / 1000 / 60 / 60).toFixed(2);
                 
-                // Shoukaku Node ping property handles rest/websocket ping. Let's try to get a rough ping if available.
-                // Node doesn't always expose ping directly in standard types, but it is sometimes on node.rest.ping or we can just skip if it's not typed.
+                // Try to safely access ping if available in node.ping or node.rest.ping
+                const ping = (node as any).ping || -1;
                 
+                description += `**Ping:** ${ping >= 0 ? ping + 'ms' : 'Unknown'}\n`;
+                description += `**Uptime:** ${uptimeHrs} hours\n`;
                 description += `**Players:** ${stats.players} active\n`;
                 description += `**Memory:** ${memoryUsed} MB / ${memoryAllocated} MB\n`;
                 description += `**CPU Load:** System ${cpuSystem}% | Lavalink ${cpuLava}%\n`;

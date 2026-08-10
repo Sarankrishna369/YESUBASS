@@ -3,6 +3,28 @@ import { YesubassClient } from '../utils/YesubassClient';
 import { YesubassPlayer } from '../player/PlayerManager';
 import { logger } from '../utils/logger';
 import { Mutex } from '../utils/Mutex';
+import { Node } from 'shoukaku';
+
+async function getLavalinkNode(client: YesubassClient, maxWaitMs = 10000): Promise<Node | undefined> {
+    let node = client.lavalink.shoukaku.options.nodeResolver(client.lavalink.shoukaku.nodes);
+    if (node) return node;
+
+    // node.state === 0 is CONNECTING
+    const isReconnecting = Array.from(client.lavalink.shoukaku.nodes.values()).some(node => node.state === 0);
+    if (!isReconnecting) {
+        logger.warn('getLavalinkNode: No nodes are currently CONNECTED or CONNECTING. Aborting wait.');
+        return undefined;
+    }
+
+    logger.info('Lavalink nodes are currently connecting/reconnecting. Waiting up to 10 seconds...');
+    const start = Date.now();
+    while (Date.now() - start < maxWaitMs) {
+        await new Promise(r => setTimeout(r, 1000));
+        node = client.lavalink.shoukaku.options.nodeResolver(client.lavalink.shoukaku.nodes);
+        if (node) return node;
+    }
+    return undefined;
+}
 
 export default {
     data: new SlashCommandBuilder()
@@ -42,7 +64,7 @@ export default {
             try {
                 player = client.players.get(interaction.guildId!);
                 if (!player) {
-                    const node = client.lavalink.shoukaku.options.nodeResolver(client.lavalink.shoukaku.nodes);
+                    const node = await getLavalinkNode(client);
                     if (!node) {
                         return interaction.followUp('❌ No Lavalink nodes are currently available.');
                     }
@@ -63,7 +85,7 @@ export default {
             }
         }
 
-        const node = client.lavalink.shoukaku.options.nodeResolver(client.lavalink.shoukaku.nodes);
+        const node = await getLavalinkNode(client);
         if (!node) return interaction.followUp('❌ No Lavalink nodes are currently available.');
 
         let searchPrefix = 'ytsearch:';
