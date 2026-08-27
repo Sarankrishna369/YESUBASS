@@ -67,6 +67,10 @@ export default {
             return interaction.reply({ content: '❌ You must be in a voice channel to play music!', ephemeral: true });
         }
 
+        if (!voiceChannel.joinable) {
+            return interaction.reply({ content: '❌ I do not have permission to join your voice channel!', ephemeral: true });
+        }
+
         const botVoiceChannel = interaction.guild?.members.me?.voice.channel;
         if (botVoiceChannel && botVoiceChannel.id !== voiceChannel.id) {
             return interaction.reply({ content: '❌ I am already playing in a different voice channel!', ephemeral: true });
@@ -96,13 +100,14 @@ export default {
                     const shoukakuPlayer = await client.lavalink.shoukaku.joinVoiceChannel({
                         guildId: interaction.guildId!,
                         channelId: voiceChannel.id,
-                        shardId: 0
+                        shardId: interaction.guild?.shardId ?? 0
                     });
                     player = new YesubassPlayer(client, shoukakuPlayer, interaction.guildId!, interaction.channelId!, voiceChannel.id);
                     client.players.set(interaction.guildId!, player);
                     logger.info(`Prevented race condition during join in guild ${interaction.guildId!}`);
                 }
-            } catch {
+            } catch (error) {
+                logger.error(`Failed to join voice channel:`, error);
                 return interaction.followUp('❌ Failed to join the voice channel.');
             } finally {
                 unlock();
@@ -126,7 +131,16 @@ export default {
         }
 
         if (result.loadType === 'playlist') {
-            return interaction.followUp('❌ Playlists are not supported in this lightweight version.');
+            const tracks = result.data.tracks;
+            for (const track of tracks) {
+                player.queue.add({ track, requester: interaction.user });
+            }
+            if (!player.queue.current) {
+                interaction.followUp(`✅ Added **${tracks.length}** tracks from playlist **${result.data.info.name}** to the queue and starting playback!`);
+                await player.playNext();
+            } else {
+                interaction.followUp(`✅ Added **${tracks.length}** tracks from playlist **${result.data.info.name}** to the queue!`);
+            }
         } else if (result.loadType === 'search' || result.loadType === 'track') {
             const track = result.loadType === 'search' ? result.data[0] : result.data;
             player.queue.add({ track, requester: interaction.user });

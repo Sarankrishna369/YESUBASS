@@ -1,10 +1,11 @@
-import { Connectors, NodeOption, Shoukaku } from 'shoukaku';
+import { Connectors, NodeOption, Shoukaku, Node } from 'shoukaku';
 import { YesubassClient } from '../utils/YesubassClient';
 import { config } from '../config/config';
 import { logger } from '../utils/logger';
 
 export class LavalinkManager {
     public shoukaku: Shoukaku;
+    private nodeReferences: Map<string, Node> = new Map();
 
     constructor(client: YesubassClient) {
         const nodes: NodeOption[] = config.lavalink.map((node) => ({
@@ -13,12 +14,6 @@ export class LavalinkManager {
             auth: node.auth,
             secure: node.secure,
         }));
-        console.log(`[LAVALINK CONFIG] Node count: ${config.lavalink.length}`);
-        console.log(`[LAVALINK CONFIG] Node names: ${config.lavalink.map(n => n.name).join(', ')}`);
-        
-        console.log('[SHOUKAKU INIT] Input node count:', nodes.length);
-        console.log('[SHOUKAKU INIT] Input node names:', nodes.map(n => n.name).join(', '));
-        console.log('[SHOUKAKU INIT] Node URLs:', nodes.map(n => n.url).join(', '));
 
         this.shoukaku = new Shoukaku(new Connectors.DiscordJS(client), nodes, {
             moveOnDisconnect: true,
@@ -47,13 +42,33 @@ export class LavalinkManager {
             }
         });
 
-        console.log('[SHOUKAKU INIT] Internal node count (sync check):', this.shoukaku.nodes.size);
-        console.log('[SHOUKAKU INIT] Internal node names (sync check):', Array.from(this.shoukaku.nodes.values()).map(n => n.name).join(', '));
+        // ROBUST FIX: Shoukaku 4.3.0 deletes the node from shoukaku.nodes on the first disconnect
+        // via `node.once("disconnect")`. To prevent race conditions, we proxy the `set` method
+        // of `shoukaku.nodes` to instantly capture the actual Node instances as they are created.
+        const originalSet = this.shoukaku.nodes.set.bind(this.shoukaku.nodes);
+        this.shoukaku.nodes.set = (key: string, node: Node) => {
+            if (!this.nodeReferences.has(key)) {
+                this.nodeReferences.set(key, node);
+                console.log(`[SHOUKAKU NODE REF] Stored node ${key}`);
+                console.log(`[SHOUKAKU NODE REF] Current references: ${this.nodeReferences.size}`);
+                
+                // Attach recovery listener
+                node.on('ready', () => {
+                    console.log(`[SHOUKAKU RECOVERY] Node ${key} ready`);
+                    if (!this.shoukaku.nodes.has(key)) {
+                        console.log(`[SHOUKAKU RECOVERY] Node ${key} missing from shoukaku.nodes — restoring`);
+                        originalSet(key, node);
+                        console.log(`[SHOUKAKU RECOVERY] Node ${key} restored successfully`);
+                    } else {
+                        console.log(`[SHOUKAKU RECOVERY] Node ${key} already exists in shoukaku.nodes`);
+                    }
+                });
+            }
+            return originalSet(key, node);
+        };
 
         this.shoukaku.on('ready', (name) => {
-            console.log(`[LAVALINK READY] ${name}`);
             logger.success(`Lavalink node ${name} emitted ready event (CONNECTED)!`);
-            console.log(`[SHOUKAKU LIFECYCLE] Node ${name} is now in shoukaku.nodes. Current size: ${this.shoukaku.nodes.size}`);
             
             // Recover players that were preserved during a connection drop
             for (const player of client.players.values()) {
@@ -85,10 +100,10 @@ export class LavalinkManager {
 
         // Connection Watchdog
         setInterval(() => {
-            if (this.shoukaku.nodes.size === 0) return;
+            if (this.nodeReferences.size === 0) return;
             
             let allDisconnected = true;
-            for (const node of this.shoukaku.nodes.values()) {
+            for (const node of this.nodeReferences.values()) {
                 // state 1 = CONNECTED, state 0 = CONNECTING
                 if (node.state === 1 || node.state === 0) {
                     allDisconnected = false;
@@ -98,7 +113,7 @@ export class LavalinkManager {
 
             if (allDisconnected) {
                 logger.warn('Watchdog: All Lavalink nodes are completely disconnected. Attempting to trigger manual reconnect...');
-                for (const node of this.shoukaku.nodes.values()) {
+                for (const node of this.nodeReferences.values()) {
                     // state 3 = DISCONNECTED, state 2 = DISCONNECTING
                     if (node.state === 3 || node.state === 2) {
                         try {
