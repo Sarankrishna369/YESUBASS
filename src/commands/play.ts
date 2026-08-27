@@ -36,8 +36,9 @@ async function getLavalinkNode(client: YesubassClient, maxWaitMs = 10000): Promi
     while (Date.now() - start < maxWaitMs) {
         console.log(`[PLAY WAIT] attempt ${attempt}`);
         console.log(`[PLAY WAIT] node count: ${client.lavalink.shoukaku.nodes.size}`);
-        const n1 = Array.from(client.lavalink.shoukaku.nodes.values()).find(n => n.name === 'Node 1');
-        console.log(`[PLAY WAIT] Node 1 state: ${n1 ? n1.state : 'undefined'}`);
+        for (const n of client.lavalink.shoukaku.nodes.values()) {
+            console.log(`[PLAY WAIT] Node ${n.name} state: ${n.state}`);
+        }
         
         await new Promise(r => setTimeout(r, 1000));
         node = client.lavalink.shoukaku.options.nodeResolver(client.lavalink.shoukaku.nodes);
