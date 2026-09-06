@@ -37,3 +37,9 @@ logging:
   level:
     root: INFO
     lavalink: INFO
+
+plugins:
+  youtube:
+    enabled: true
+    oauth:
+      enabled: true
