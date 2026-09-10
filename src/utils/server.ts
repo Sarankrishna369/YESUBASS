@@ -30,6 +30,8 @@ const upload = multer({ storage });
 
 export function startApiServer(client: YesubassClient) {
     const app = express();
+    const searchCache = new Map<string, { timestamp: number, results: any[] }>();
+    const trackCache = new Map<string, any>();
     app.use(cors());
     app.use(express.json());
     app.use('/sounds', express.static(soundsDir));
@@ -200,7 +202,8 @@ export function startApiServer(client: YesubassClient) {
             if (err) {
                 return res.status(500).json({ error: 'Failed to list sounds' });
             }
-            res.status(200).json({ sounds: files });
+            const validSounds = (files || []).filter(f => !f.startsWith('.') && /\.(mp3|wav|ogg|m4a|aac|flac)$/i.test(f));
+            res.status(200).json({ sounds: validSounds });
         });
     });
 
@@ -287,37 +290,59 @@ export function startApiServer(client: YesubassClient) {
                 }
             }
 
-            const node = client.lavalink.shoukaku.options.nodeResolver(client.lavalink.shoukaku.nodes);
-            if (!node) {
-                return res.status(503).json({ error: 'No Lavalink nodes available.' });
-            }
+            const cachedTrack = trackCache.get(query) || trackCache.get(query.toLowerCase());
+            let trackAdded: any = null;
 
-            let searchPrefix = 'ytsearch:';
-            if (query.startsWith('http://') || query.startsWith('https://')) {
-                searchPrefix = '';
-            }
+            if (cachedTrack) {
+                trackAdded = cachedTrack;
+                const user = client.users.cache.get(userId) || { id: userId, username: 'Web User' };
+                player.queue.add({ track: cachedTrack, requester: user as any });
+            } else {
+                const node = client.lavalink.shoukaku.options.nodeResolver(client.lavalink.shoukaku.nodes);
+                if (!node) {
+                    return res.status(503).json({ error: 'No Lavalink nodes available.' });
+                }
 
-            const result = await node.rest.resolve(`${searchPrefix}${query}`);
-            if (!result || !result.data) {
-                return res.status(404).json({ error: 'No results found.' });
-            }
+                let searchPrefix = 'ytsearch:';
+                if (query.startsWith('http://') || query.startsWith('https://')) {
+                    searchPrefix = '';
+                }
 
-            let trackAdded = null;
-            if (result.loadType === 'playlist') {
-                const tracks = result.data.tracks;
-                trackAdded = tracks[0];
-                for (const track of tracks) {
-                    // For API, we don't have a discord User object, so we mock the requester
+                let result: any = null;
+                try {
+                    result = await node.rest.resolve(`${searchPrefix}${query}`);
+                } catch (resolveErr: any) {
+                    if (searchPrefix === 'ytsearch:') {
+                        try {
+                            result = await node.rest.resolve(`ytmsearch:${query}`);
+                        } catch (e2) {
+                            try {
+                                result = await node.rest.resolve(`scsearch:${query}`);
+                            } catch (e3) {}
+                        }
+                    }
+                    if (!result) throw resolveErr;
+                }
+
+                if (!result || !result.data) {
+                    return res.status(404).json({ error: 'No results found.' });
+                }
+
+                if (result.loadType === 'playlist') {
+                    const tracks = result.data.tracks;
+                    trackAdded = tracks[0];
+                    for (const track of tracks) {
+                        const user = client.users.cache.get(userId) || { id: userId, username: 'Web User' };
+                        player.queue.add({ track, requester: user as any });
+                    }
+                } else if (result.loadType === 'search' || result.loadType === 'track') {
+                    const track = result.loadType === 'search' ? result.data[0] : result.data;
+                    trackAdded = track;
                     const user = client.users.cache.get(userId) || { id: userId, username: 'Web User' };
                     player.queue.add({ track, requester: user as any });
+                } else {
+                    return res.status(404).json({ error: 'No results found.' });
                 }
-            } else if (result.loadType === 'search' || result.loadType === 'track') {
-                const track = result.loadType === 'search' ? result.data[0] : result.data;
-                trackAdded = track;
-                const user = client.users.cache.get(userId) || { id: userId, username: 'Web User' };
-                player.queue.add({ track, requester: user as any });
-            } else {
-                return res.status(404).json({ error: 'No results found.' });
             }
 
             if (!player.queue.current) {
@@ -326,8 +351,11 @@ export function startApiServer(client: YesubassClient) {
 
             res.status(200).json({ success: true, track: trackAdded?.info?.title || 'Track' });
 
-        } catch (error) {
+        } catch (error: any) {
             logger.error(`[API] Failed to process music play:`, error);
+            if (error?.status === 429 || error?.message?.includes('429') || error?.message?.includes('Too many')) {
+                return res.status(429).json({ error: 'Audio provider is currently busy. Please try again in a moment.' });
+            }
             res.status(500).json({ error: 'Failed to process request.' });
         }
     });
@@ -505,19 +533,43 @@ export function startApiServer(client: YesubassClient) {
             return res.status(400).json({ error: 'Missing query' });
         }
 
+        const trimmed = query.trim();
+        if (trimmed.length < 2) {
+            return res.status(200).json({ results: [] });
+        }
+
+        const cacheKey = trimmed.toLowerCase();
+        const cached = searchCache.get(cacheKey);
+        if (cached && Date.now() - cached.timestamp < 300000) {
+            return res.status(200).json({ results: cached.results });
+        }
+
         const node = client.lavalink.shoukaku.options.nodeResolver(client.lavalink.shoukaku.nodes);
         if (!node) {
             return res.status(503).json({ error: 'No Lavalink nodes available.' });
         }
 
         try {
-            const trimmed = query.trim();
             let searchPrefix = 'ytsearch:';
             if (trimmed.startsWith('http://') || trimmed.startsWith('https://')) {
                 searchPrefix = '';
             }
 
-            const result = await node.rest.resolve(`${searchPrefix}${trimmed}`);
+            let result: any = null;
+            try {
+                result = await node.rest.resolve(`${searchPrefix}${trimmed}`);
+            } catch (err: any) {
+                if (searchPrefix === 'ytsearch:') {
+                    try {
+                        result = await node.rest.resolve(`ytmsearch:${trimmed}`);
+                    } catch (err2) {
+                        try {
+                            result = await node.rest.resolve(`scsearch:${trimmed}`);
+                        } catch (err3) {}
+                    }
+                }
+            }
+
             if (!result || !result.data) {
                 return res.status(200).json({ results: [] });
             }
@@ -533,6 +585,18 @@ export function startApiServer(client: YesubassClient) {
                 return res.status(200).json({ results: [] });
             }
 
+            // Cache track objects in memory for instant zero-latency playback
+            for (const t of tracks) {
+                if (t && t.info) {
+                    if (t.info.uri) trackCache.set(t.info.uri, t);
+                    if (t.info.title) trackCache.set(t.info.title.toLowerCase(), t);
+                }
+            }
+            if (trackCache.size > 300) {
+                const keys = Array.from(trackCache.keys()).slice(0, 50);
+                keys.forEach(k => trackCache.delete(k));
+            }
+
             const formatted = tracks
                 .filter((t: any) => t && t.info && t.info.title)
                 .map((t: any) => ({
@@ -542,6 +606,12 @@ export function startApiServer(client: YesubassClient) {
                     identifier: t.info.identifier || '',
                     duration: t.info.length || 0
                 }));
+
+            searchCache.set(cacheKey, { timestamp: Date.now(), results: formatted });
+            if (searchCache.size > 200) {
+                const keys = Array.from(searchCache.keys()).slice(0, 50);
+                keys.forEach(k => searchCache.delete(k));
+            }
 
             res.status(200).json({ results: formatted });
         } catch (err) {
