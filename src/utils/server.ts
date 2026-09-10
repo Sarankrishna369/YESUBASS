@@ -14,7 +14,142 @@ if (!fs.existsSync(soundsDir)) {
     fs.mkdirSync(soundsDir, { recursive: true });
 }
 
-const catboxCache = new Map<string, string>();
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://rbkwnecjjahahgncevvo.supabase.co';
+const SUPABASE_KEY = process.env.SUPABASE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJia3duZWNqamFoYWhnbmNldnZvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg4NTkxNzEsImV4cCI6MjEwNDQzNTE3MX0.8_f2XA9Jpt8pkG8MEXvYWI9pbZcFsvGXGvQRYjBHwv0';
+
+const soundUrlCache = new Map<string, string>();
+
+async function uploadSoundPermanently(filename: string, buffer: Buffer, originalName?: string): Promise<string> {
+    const ext = path.extname(filename).toLowerCase();
+    const mimeMap: Record<string, string> = {
+        '.mp3': 'audio/mpeg',
+        '.wav': 'audio/wav',
+        '.ogg': 'audio/ogg',
+        '.m4a': 'audio/mp4',
+        '.aac': 'audio/aac',
+        '.flac': 'audio/flac'
+    };
+    const mimeType = mimeMap[ext] || 'audio/mpeg';
+
+    let uploadedUrl = '';
+
+    // 1. Upload to Supabase Storage (reliable, permanent cloud storage)
+    try {
+        const supaStorageRes = await fetch(`${SUPABASE_URL}/storage/v1/object/sounds/${encodeURIComponent(filename)}`, {
+            method: 'POST',
+            headers: {
+                'apikey': SUPABASE_KEY,
+                'Authorization': `Bearer ${SUPABASE_KEY}`,
+                'Content-Type': mimeType,
+                'x-upsert': 'true'
+            },
+            body: new Uint8Array(buffer)
+        });
+        if (supaStorageRes.ok) {
+            uploadedUrl = `${SUPABASE_URL}/storage/v1/object/public/sounds/${encodeURIComponent(filename)}`;
+            logger.info(`[Soundboard] Uploaded ${filename} to Supabase Storage: ${uploadedUrl}`);
+        } else {
+            const errText = await supaStorageRes.text();
+            logger.warn(`[Soundboard] Supabase storage upload warning: ${errText}`);
+        }
+    } catch (err) {
+        logger.error(`[Soundboard] Supabase storage upload error:`, err);
+    }
+
+    // 2. Also upload to Catbox for instant high-speed audio CDN
+    try {
+        const blob = new Blob([new Uint8Array(buffer)], { type: mimeType });
+        const form = new FormData();
+        form.append('reqtype', 'fileupload');
+        form.append('fileToUpload', blob, filename);
+
+        const catboxRes = await fetch('https://catbox.moe/user/api.php', {
+            method: 'POST',
+            body: form
+        });
+        const catboxUrl = (await catboxRes.text()).trim();
+        if (catboxUrl && catboxUrl.startsWith('http')) {
+            logger.info(`[Soundboard] Uploaded ${filename} to Catbox: ${catboxUrl}`);
+            uploadedUrl = catboxUrl;
+        }
+    } catch (err) {
+        logger.warn(`[Soundboard] Catbox upload error:`, err);
+    }
+
+    if (!uploadedUrl) {
+        uploadedUrl = `${SUPABASE_URL}/storage/v1/object/public/sounds/${encodeURIComponent(filename)}`;
+    }
+
+    // 3. Upsert record into Supabase custom_sounds table
+    try {
+        const rawBase = originalName || filename;
+        const displayName = path.basename(rawBase, path.extname(rawBase))
+            .replace(/^\d+-/, '')
+            .replace(/[_-]+/g, ' ')
+            .trim() || 'Custom Sound';
+
+        await fetch(`${SUPABASE_URL}/rest/v1/custom_sounds`, {
+            method: 'POST',
+            headers: {
+                'apikey': SUPABASE_KEY,
+                'Authorization': `Bearer ${SUPABASE_KEY}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                name: displayName,
+                filename: filename,
+                url: uploadedUrl
+            })
+        });
+        logger.info(`[Soundboard] Saved sound metadata in Supabase: "${displayName}" (${filename})`);
+    } catch (dbErr) {
+        logger.error(`[Soundboard] Failed to save sound metadata in Supabase:`, dbErr);
+    }
+
+    soundUrlCache.set(filename, uploadedUrl);
+    return uploadedUrl;
+}
+
+async function initSoundboardPersistence() {
+    try {
+        const res = await fetch(`${SUPABASE_URL}/rest/v1/custom_sounds?select=*&order=created_at.desc`, {
+            headers: {
+                'apikey': SUPABASE_KEY,
+                'Authorization': `Bearer ${SUPABASE_KEY}`
+            }
+        });
+        if (res.ok) {
+            const rows: any = await res.json();
+            if (Array.isArray(rows)) {
+                for (const row of rows) {
+                    if (row.filename && row.url) {
+                        soundUrlCache.set(row.filename, row.url);
+                    }
+                }
+                logger.info(`[Soundboard] Loaded ${rows.length} custom sounds from Supabase.`);
+            }
+        }
+    } catch (err) {
+        logger.error(`[Soundboard] Failed to load sounds from Supabase:`, err);
+    }
+
+    // Check any local sounds in public/sounds that are not yet in Supabase
+    try {
+        if (fs.existsSync(soundsDir)) {
+            const files = fs.readdirSync(soundsDir).filter(f => !f.startsWith('.') && /\.(mp3|wav|ogg|m4a|aac|flac)$/i.test(f));
+            for (const file of files) {
+                if (!soundUrlCache.has(file)) {
+                    logger.info(`[Soundboard] Syncing local sound to Supabase: ${file}`);
+                    const filePath = path.join(soundsDir, file);
+                    const buffer = fs.readFileSync(filePath);
+                    await uploadSoundPermanently(file, buffer, file);
+                }
+            }
+        }
+    } catch (err) {
+        logger.error(`[Soundboard] Failed to sync local sounds:`, err);
+    }
+}
 
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
@@ -22,8 +157,9 @@ const storage = multer.diskStorage({
     },
     filename: (req, file, cb) => {
         const ext = path.extname(file.originalname) || '.mp3';
-        const cleanBase = path.basename(file.originalname, ext).replace(/[^\w\s-]/g, '').trim().replace(/[\s\-_]+/g, '_') || 'sound';
-        cb(null, `${Date.now()}-${cleanBase.slice(0, 50)}${ext}`);
+        const rawBase = path.basename(file.originalname, ext);
+        const cleanBase = rawBase.replace(/[^a-zA-Z0-9_-]/g, '_').replace(/_+/g, '_').replace(/^_+|_+$/g, '') || 'sound';
+        cb(null, `${Date.now()}-${cleanBase.slice(0, 60)}${ext}`);
     }
 });
 const upload = multer({ storage });
@@ -137,38 +273,43 @@ export function startApiServer(client: YesubassClient) {
                 searchUrl = builtInSounds[soundName];
             } else if (!soundName.startsWith('http')) {
                 // Must be a custom sound
-                const localFilePath = path.join(soundsDir, path.basename(soundName));
-                if (fs.existsSync(localFilePath)) {
-                    if (catboxCache.has(soundName)) {
-                        searchUrl = catboxCache.get(soundName)!;
-                    } else {
-                        try {
-                            const buffer = fs.readFileSync(localFilePath);
-                            const blob = new Blob([buffer], { type: 'audio/mpeg' });
-                            const form = new FormData();
-                            form.append('reqtype', 'fileupload');
-                            form.append('fileToUpload', blob, path.basename(soundName));
+                if (soundUrlCache.has(soundName)) {
+                    searchUrl = soundUrlCache.get(soundName)!;
+                } else {
+                    // Try to resolve from Supabase
+                    try {
+                        const supaRes = await fetch(`${SUPABASE_URL}/rest/v1/custom_sounds?or=(filename.eq.${encodeURIComponent(soundName)},name.eq.${encodeURIComponent(soundName)})&select=url&limit=1`, {
+                            headers: {
+                                'apikey': SUPABASE_KEY,
+                                'Authorization': `Bearer ${SUPABASE_KEY}`
+                            }
+                        });
+                        if (supaRes.ok) {
+                            const rows: any = await supaRes.json();
+                            if (Array.isArray(rows) && rows.length > 0 && rows[0].url) {
+                                searchUrl = rows[0].url;
+                                soundUrlCache.set(soundName, rows[0].url);
+                            }
+                        }
+                    } catch (dbErr) {
+                        logger.error('[Soundboard] Error querying Supabase for sound URL:', dbErr);
+                    }
 
-                            const catboxRes = await fetch('https://catbox.moe/user/api.php', {
-                                method: 'POST',
-                                body: form
-                            });
-                            const directUrl = (await catboxRes.text()).trim();
-                            if (directUrl && directUrl.startsWith('http')) {
-                                catboxCache.set(soundName, directUrl);
-                                searchUrl = directUrl;
-                            } else {
+                    if (!searchUrl.startsWith('http')) {
+                        const localFilePath = path.join(soundsDir, path.basename(soundName));
+                        if (fs.existsSync(localFilePath)) {
+                            try {
+                                const buffer = fs.readFileSync(localFilePath);
+                                searchUrl = await uploadSoundPermanently(path.basename(soundName), buffer);
+                            } catch {
                                 const cleanName = soundName.replace(/^\d+-/, '').replace(/_+/g, ' ').replace('.mp3', '');
                                 searchUrl = `ytsearch:${cleanName} sound effect`;
                             }
-                        } catch (uploadErr) {
+                        } else {
                             const cleanName = soundName.replace(/^\d+-/, '').replace(/_+/g, ' ').replace('.mp3', '');
                             searchUrl = `ytsearch:${cleanName} sound effect`;
                         }
                     }
-                } else {
-                    const cleanName = soundName.replace(/^\d+-/, '').replace(/_+/g, ' ').replace('.mp3', '');
-                    searchUrl = `ytsearch:${cleanName} sound effect`;
                 }
             }
 
@@ -197,38 +338,116 @@ export function startApiServer(client: YesubassClient) {
         }
     });
 
-    app.get('/api/soundboard/list', (req, res) => {
-        fs.readdir(soundsDir, (err, files) => {
-            if (err) {
+    app.get('/api/soundboard/list', async (req, res) => {
+        try {
+            const supaRes = await fetch(`${SUPABASE_URL}/rest/v1/custom_sounds?select=*&order=created_at.desc`, {
+                headers: {
+                    'apikey': SUPABASE_KEY,
+                    'Authorization': `Bearer ${SUPABASE_KEY}`
+                }
+            });
+
+            let customRows: Array<{ id?: number, name: string, filename: string, url: string }> = [];
+            if (supaRes.ok) {
+                customRows = await supaRes.json();
+                for (const row of customRows) {
+                    if (row.filename && row.url) {
+                        soundUrlCache.set(row.filename, row.url);
+                    }
+                }
+            }
+
+            const existingFilenames = new Set(customRows.map(r => r.filename));
+            if (fs.existsSync(soundsDir)) {
+                const localFiles = fs.readdirSync(soundsDir).filter(f => !f.startsWith('.') && /\.(mp3|wav|ogg|m4a|aac|flac)$/i.test(f));
+                for (const f of localFiles) {
+                    if (!existingFilenames.has(f)) {
+                        existingFilenames.add(f);
+                        customRows.push({
+                            name: f.replace(/^\d+-/, '').replace(/\.[^/.]+$/, '').replace(/[_-]+/g, ' ').trim(),
+                            filename: f,
+                            url: soundUrlCache.get(f) || `/sounds/${f}`
+                        });
+                    }
+                }
+            }
+
+            return res.status(200).json({
+                sounds: Array.from(existingFilenames),
+                soundData: customRows
+            });
+        } catch (err) {
+            logger.error('[API] Failed to list sounds:', err);
+            try {
+                const files = fs.readdirSync(soundsDir).filter(f => !f.startsWith('.') && /\.(mp3|wav|ogg|m4a|aac|flac)$/i.test(f));
+                return res.status(200).json({ sounds: files });
+            } catch {
                 return res.status(500).json({ error: 'Failed to list sounds' });
             }
-            const validSounds = (files || []).filter(f => !f.startsWith('.') && /\.(mp3|wav|ogg|m4a|aac|flac)$/i.test(f));
-            res.status(200).json({ sounds: validSounds });
-        });
+        }
     });
 
-    app.post('/api/soundboard/upload', upload.single('sound'), (req, res) => {
+    app.post('/api/soundboard/upload', upload.single('sound'), async (req, res) => {
         if (!req.file) {
             return res.status(400).json({ error: 'No file uploaded' });
         }
-        res.status(200).json({ success: true, filename: req.file.filename });
+
+        try {
+            const buffer = fs.readFileSync(req.file.path);
+            const permanentUrl = await uploadSoundPermanently(req.file.filename, buffer, req.file.originalname);
+            return res.status(200).json({ 
+                success: true, 
+                filename: req.file.filename,
+                url: permanentUrl
+            });
+        } catch (uploadErr) {
+            logger.error('[API] Error during sound upload persistence:', uploadErr);
+            return res.status(200).json({ 
+                success: true, 
+                filename: req.file.filename,
+                warning: 'Saved locally, cloud sync pending'
+            });
+        }
     });
 
-    app.delete('/api/soundboard/delete', (req, res) => {
+    app.delete('/api/soundboard/delete', async (req, res) => {
         const { filename } = req.body;
         if (!filename) return res.status(400).json({ error: 'Missing filename' });
         const safeName = path.basename(filename);
-        const targetPath = path.join(soundsDir, safeName);
-        if (fs.existsSync(targetPath)) {
-            try {
+
+        try {
+            // Delete from Supabase database
+            await fetch(`${SUPABASE_URL}/rest/v1/custom_sounds?filename=eq.${encodeURIComponent(safeName)}`, {
+                method: 'DELETE',
+                headers: {
+                    'apikey': SUPABASE_KEY,
+                    'Authorization': `Bearer ${SUPABASE_KEY}`
+                }
+            });
+
+            // Delete from Supabase storage
+            await fetch(`${SUPABASE_URL}/storage/v1/object/sounds`, {
+                method: 'DELETE',
+                headers: {
+                    'apikey': SUPABASE_KEY,
+                    'Authorization': `Bearer ${SUPABASE_KEY}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ prefixes: [safeName] })
+            });
+
+            // Delete from local disk
+            const targetPath = path.join(soundsDir, safeName);
+            if (fs.existsSync(targetPath)) {
                 fs.unlinkSync(targetPath);
-                catboxCache.delete(safeName);
-                return res.status(200).json({ success: true });
-            } catch (err) {
-                return res.status(500).json({ error: 'Failed to delete file' });
             }
+
+            soundUrlCache.delete(safeName);
+            return res.status(200).json({ success: true });
+        } catch (err) {
+            logger.error('[API] Failed to delete sound:', err);
+            return res.status(500).json({ error: 'Failed to delete file' });
         }
-        res.status(404).json({ error: 'Sound not found' });
     });
 
     app.post('/api/music/play', async (req, res) => {
@@ -738,5 +957,6 @@ export function startApiServer(client: YesubassClient) {
 
     app.listen(config.port, () => {
         logger.success(`Keep-alive server listening on port ${config.port}`);
+        initSoundboardPersistence().catch(err => logger.error('[Soundboard] Init persistence error:', err));
     });
 }
