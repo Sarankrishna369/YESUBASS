@@ -3,3 +3,5 @@ dist/
 .env
 logs/
 *.log
+public/sounds/*
+!public/sounds/.gitkeep

@@ -43,7 +43,7 @@ export class YesubassClient extends Client {
         logger.info('Starting YESUBASS V2 Boot Sequence...');
         
         // Start API Server
-        startApiServer();
+        startApiServer(this);
 
         // Init Lavalink (Shoukaku)
         this.lavalink = new LavalinkManager(this);

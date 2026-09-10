@@ -146,6 +146,7 @@ export class YesubassPlayer {
     }
 
     private async sendMessage(content: string) {
+        if (!this.textChannelId) return;
         try {
             const channel = await this.client.channels.fetch(this.textChannelId) as TextChannel;
             if (channel) await channel.send(content);
@@ -155,6 +156,7 @@ export class YesubassPlayer {
     }
 
     private async sendNowPlaying() {
+        if (!this.textChannelId) return;
         try {
             const channel = await this.client.channels.fetch(this.textChannelId) as TextChannel;
             if (channel && this.queue.current) {
