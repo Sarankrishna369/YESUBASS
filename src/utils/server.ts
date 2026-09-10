@@ -177,12 +177,12 @@ export function startApiServer(client: YesubassClient) {
                 return res.status(404).json({ error: 'Sound track could not be resolved.' });
             }
 
-            const track = result.loadType === 'search' ? result.data[0] : (result.loadType === 'playlist' ? result.data.tracks[0] : result.data);
+            const track: any = result.loadType === 'search' ? result.data[0] : (result.loadType === 'playlist' ? result.data.tracks[0] : result.data);
             
-            if (track) {
+            if (track && track.encoded) {
                 const user = client.users.cache.get(userId) || { id: userId, username: 'Web User' };
                 // Add to queue and play if nothing is playing
-                player.queue.add({ track, requester: user as any });
+                player.queue.add({ track: track as any, requester: user as any });
                 if (!player.queue.current) {
                     await player.playNext();
                 }
