@@ -44,7 +44,12 @@ export class YesubassPlayer {
             }
         });
 
-        this.player.on('end', async (_data) => {
+        this.player.on('end', async (_data: any) => {
+            // Ignore replaced events to prevent race conditions during skip or track switching
+            if (_data?.reason === 'replaced' || _data?.reason === 'REPLACED') {
+                return;
+            }
+
             if (this.queue.loopTrack && this.queue.current) {
                 this.playTrack(this.queue.current);
                 return;
@@ -55,6 +60,7 @@ export class YesubassPlayer {
             }
 
             this.queue.current = null;
+            this.lastPosition = 0;
             await this.playNext();
         });
 
@@ -82,6 +88,7 @@ export class YesubassPlayer {
 
     public async playTrack(queuedTrack: QueuedTrack) {
         this.queue.current = queuedTrack;
+        this.lastPosition = 0;
         await this.player.playTrack({ track: { encoded: queuedTrack.track.encoded } });
     }
 
@@ -92,6 +99,9 @@ export class YesubassPlayer {
             if (next) {
                 await this.playTrack(next);
             } else {
+                this.queue.current = null;
+                this.lastPosition = 0;
+                await this.player.stopTrack();
                 this.sendMessage('Queue ended. Add more songs to keep the party going!');
             }
         } catch (err) {
@@ -101,6 +111,10 @@ export class YesubassPlayer {
             if (this.queue.tracks.length > 0) {
                 const recoveryNext = this.queue.tracks.shift();
                 if (recoveryNext) await this.playTrack(recoveryNext);
+            } else {
+                this.queue.current = null;
+                this.lastPosition = 0;
+                await this.player.stopTrack();
             }
         } finally {
             unlock();

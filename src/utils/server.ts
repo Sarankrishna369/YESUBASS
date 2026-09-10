@@ -404,9 +404,16 @@ export function startApiServer(client: YesubassClient) {
                     break;
                 case 'skip_next':
                 case 'skip_prev':
-                    // We don't have skip_prev implemented in the queue, so just act as skip for both
+                    if (player.queue.loopTrack) {
+                        player.queue.loopTrack = false;
+                    }
                     await player.playNext();
-                    break;
+                    return res.status(200).json({
+                        success: true,
+                        message: 'Skipped track',
+                        currentTrack: player.queue.current?.track?.info?.title || 'No track playing',
+                        isPlaying: !!player.queue.current && !player.player.paused
+                    });
                 case 'volume':
                     const vol = parseInt(req.body.value, 10);
                     if (!isNaN(vol) && vol >= 0 && vol <= 100) {
@@ -671,12 +678,21 @@ export function startApiServer(client: YesubassClient) {
             }
 
             if (!targetGuildId) {
-                return res.status(200).json({ isPlaying: false, currentTrack: 'Not in a voice channel' });
+                for (const [guildId, guild] of client.guilds.cache) {
+                    if (guild.members.cache.has(userId) && client.players.has(guildId)) {
+                        targetGuildId = guildId;
+                        break;
+                    }
+                }
+            }
+
+            if (!targetGuildId) {
+                return res.status(200).json({ isPlaying: false, currentTrack: 'Not in a voice channel', position: 0, duration: 0, queue: [] });
             }
 
             const player = client.players.get(targetGuildId);
             if (!player || !player.queue.current) {
-                return res.status(200).json({ isPlaying: false, currentTrack: 'No track playing' });
+                return res.status(200).json({ isPlaying: false, currentTrack: 'No track playing', position: 0, duration: 0, queue: [] });
             }
 
             const upcomingQueue = player.queue.tracks.slice(0, 25).map((q, idx) => ({
