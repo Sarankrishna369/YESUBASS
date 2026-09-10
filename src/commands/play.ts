@@ -32,6 +32,6 @@ export default {
                 .setStyle(ButtonStyle.Link)
         );
 
-        return interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
+        return interaction.reply({ embeds: [embed], components: [row] });
     }
 };
