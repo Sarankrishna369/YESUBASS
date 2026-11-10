@@ -164,6 +164,114 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
+const sseClients = new Set<express.Response>();
+
+export function broadcastEvent(event: string, data: any) {
+    const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+    for (const clientRes of sseClients) {
+        try {
+            clientRes.write(payload);
+        } catch {
+            sseClients.delete(clientRes);
+        }
+    }
+}
+
+export function broadcastPlayerStatus(client: YesubassClient, player?: YesubassPlayer | null) {
+    if (!player) {
+        broadcastEvent('queue_updated', {
+            isPlaying: false,
+            currentTrack: 'No track playing',
+            position: 0,
+            duration: 0,
+            queue: []
+        });
+        return;
+    }
+
+    const upcomingQueue = player.queue.tracks.slice(0, 50).map((q, idx) => ({
+        index: idx,
+        title: q?.track?.info?.title || 'Unknown',
+        author: q?.track?.info?.author || 'Unknown',
+        uri: q?.track?.info?.uri || '',
+        duration: q?.track?.info?.length || 0,
+        requester: q?.requester?.username || (q?.requester as any)?.name || 'Friend'
+    }));
+
+    broadcastEvent('queue_updated', {
+        isPlaying: !player.player.paused && !player.isPlayingSoundboard,
+        currentTrack: player.isPlayingSoundboard 
+            ? (player.soundboardSavedState?.track?.track?.info?.title || 'Soundboard Effect')
+            : (player.queue.current?.track?.info?.title || 'No track playing'),
+        volume: player.player.filters?.volume ?? 100,
+        position: player.isPlayingSoundboard 
+            ? (player.soundboardSavedState?.position || 0)
+            : (player.player.position || 0),
+        duration: player.isPlayingSoundboard
+            ? (player.soundboardSavedState?.track?.track?.info?.length || 0)
+            : (player.queue.current?.track?.info?.length || 0),
+        queue: upcomingQueue
+    });
+}
+
+function resolveGuildAndPlayer(client: YesubassClient, userId?: string): {
+    targetGuildId: string | null;
+    targetVoiceChannelId: string | null;
+    player: YesubassPlayer | null;
+} {
+    let targetGuildId: string | null = null;
+    let targetVoiceChannelId: string | null = null;
+
+    if (userId) {
+        for (const [guildId, guild] of client.guilds.cache) {
+            const vs = guild.voiceStates.cache.get(userId);
+            if (vs && vs.channelId) {
+                targetGuildId = guildId;
+                targetVoiceChannelId = vs.channelId;
+                break;
+            }
+            const member = guild.members.cache.get(userId);
+            if (member && member.voice?.channelId) {
+                targetGuildId = guildId;
+                targetVoiceChannelId = member.voice.channelId;
+                break;
+            }
+        }
+    }
+
+    let player = targetGuildId ? (client.players.get(targetGuildId) || null) : null;
+
+    // Fallback 1: check guilds where a player is active and user is a member
+    if (!player && userId) {
+        for (const [gId, p] of client.players) {
+            const guild = client.guilds.cache.get(gId);
+            if (guild && (guild.voiceStates.cache.has(userId) || guild.members.cache.has(userId))) {
+                targetGuildId = gId;
+                targetVoiceChannelId = p.voiceChannelId;
+                player = p;
+                break;
+            }
+        }
+    }
+
+    // Fallback 2: if there is an active player in the bot, use that active player
+    if (!player && client.players.size > 0) {
+        const firstEntry = client.players.first();
+        if (firstEntry) {
+            player = firstEntry;
+            targetGuildId = firstEntry.guildId;
+            targetVoiceChannelId = firstEntry.voiceChannelId;
+        }
+    }
+
+    // Fallback 3: default to first guild if targetGuildId is still not found
+    if (!targetGuildId && client.guilds.cache.size > 0) {
+        targetGuildId = client.guilds.cache.firstKey() || null;
+    }
+
+    return { targetGuildId, targetVoiceChannelId, player };
+}
+
 export function startApiServer(client: YesubassClient) {
     const app = express();
     const searchCache = new Map<string, { timestamp: number, results: any[] }>();
@@ -171,6 +279,12 @@ export function startApiServer(client: YesubassClient) {
     app.use(cors());
     app.use(express.json());
     app.use('/sounds', express.static(soundsDir));
+
+    // Listen to player updates from YesubassPlayer
+    client.on('playerUpdate', (p: YesubassPlayer) => {
+        broadcastPlayerStatus(client, p);
+    });
+
     app.get('/', (req, res) => {
         res.send('YESUBASS V2 is running!');
     });
@@ -191,33 +305,86 @@ export function startApiServer(client: YesubassClient) {
         });
     });
 
+    // Real-Time Server-Sent Events (SSE) Stream
+    app.get('/api/events', (req, res) => {
+        res.setHeader('Content-Type', 'text/event-stream');
+        res.setHeader('Cache-Control', 'no-cache, no-transform');
+        res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Accel-Buffering', 'no');
+        res.flushHeaders?.();
+
+        sseClients.add(res);
+
+        // Send connection confirmation
+        res.write(`event: connected\ndata: ${JSON.stringify({ timestamp: Date.now() })}\n\n`);
+
+        // Send current player status immediately upon connection
+        const { userId } = req.query;
+        const resolved = resolveGuildAndPlayer(client, typeof userId === 'string' ? userId : undefined);
+        if (resolved.player) {
+            const player = resolved.player;
+            const upcomingQueue = player.queue.tracks.slice(0, 50).map((q, idx) => ({
+                index: idx,
+                title: q?.track?.info?.title || 'Unknown',
+                author: q?.track?.info?.author || 'Unknown',
+                uri: q?.track?.info?.uri || '',
+                duration: q?.track?.info?.length || 0,
+                requester: q?.requester?.username || (q?.requester as any)?.name || 'Friend'
+            }));
+
+            res.write(`event: queue_updated\ndata: ${JSON.stringify({
+                isPlaying: !player.player.paused && !player.isPlayingSoundboard,
+                currentTrack: player.isPlayingSoundboard 
+                    ? (player.soundboardSavedState?.track?.track?.info?.title || 'Soundboard Effect')
+                    : (player.queue.current?.track?.info?.title || 'No track playing'),
+                volume: player.player.filters?.volume ?? 100,
+                position: player.isPlayingSoundboard 
+                    ? (player.soundboardSavedState?.position || 0)
+                    : (player.player.position || 0),
+                duration: player.isPlayingSoundboard
+                    ? (player.soundboardSavedState?.track?.track?.info?.length || 0)
+                    : (player.queue.current?.track?.info?.length || 0),
+                queue: upcomingQueue
+            })}\n\n`);
+        }
+
+        const pingInterval = setInterval(() => {
+            try {
+                res.write(': ping\n\n');
+            } catch {
+                clearInterval(pingInterval);
+                sseClients.delete(res);
+            }
+        }, 20000);
+
+        req.on('close', () => {
+            clearInterval(pingInterval);
+            sseClients.delete(res);
+        });
+    });
+
     app.post('/api/soundboard/play', async (req, res) => {
-        const { userId, soundName } = req.body;
+        const { userId, soundName, userName, displayName } = req.body;
         if (!userId || !soundName) {
             return res.status(400).json({ error: 'Missing userId or soundName' });
         }
 
-        let targetVoiceChannelId: string | null = null;
-        let targetGuildId: string | null = null;
+        const resolved = resolveGuildAndPlayer(client, userId);
+        let targetVoiceChannelId = resolved.targetVoiceChannelId;
+        let targetGuildId = resolved.targetGuildId;
+        let player = resolved.player;
 
-        for (const [guildId, guild] of client.guilds.cache) {
-            const member = guild.members.cache.get(userId);
-            if (member && member.voice.channelId) {
-                targetVoiceChannelId = member.voice.channelId;
-                targetGuildId = guildId;
-                break;
-            }
+        if (!targetVoiceChannelId && player) {
+            targetVoiceChannelId = player.voiceChannelId;
         }
 
         if (!targetVoiceChannelId || !targetGuildId) {
-            return res.status(404).json({ error: 'User is not in a voice channel.' });
+            return res.status(404).json({ error: 'User is not in a voice channel and no active player found.' });
         }
 
         logger.info(`[API] Soundboard request for sound: ${soundName} by user: ${userId} in guild: ${targetGuildId}`);
 
         try {
-            let player = client.players.get(targetGuildId);
-            
             if (!player) {
                 let joinLock = client.joinLocks.get(targetGuildId);
                 if (!joinLock) {
@@ -227,7 +394,7 @@ export function startApiServer(client: YesubassClient) {
 
                 const unlock = await joinLock.lock();
                 try {
-                    player = client.players.get(targetGuildId);
+                    player = client.players.get(targetGuildId) || null;
                     if (!player) {
                         const node = client.lavalink.shoukaku.options.nodeResolver(client.lavalink.shoukaku.nodes);
                         if (!node) {
@@ -321,12 +488,21 @@ export function startApiServer(client: YesubassClient) {
             const track: any = result.loadType === 'search' ? result.data[0] : (result.loadType === 'playlist' ? result.data.tracks[0] : result.data);
             
             if (track && track.encoded) {
-                const user = client.users.cache.get(userId) || { id: userId, username: 'Web User' };
-                // Add to queue and play if nothing is playing
-                player.queue.add({ track: track as any, requester: user as any });
-                if (!player.queue.current) {
-                    await player.playNext();
-                }
+                const user = client.users.cache.get(userId) || { id: userId, username: userName || 'Web User' };
+                const effectiveName = userName || (user as any).username || 'A friend';
+                const finalDisplayName = displayName || soundName;
+
+                // Play soundboard effect immediately in voice (interrupts & seamlessly resumes song)
+                await player.playSoundboard({ track: track as any, requester: { id: userId, username: effectiveName } as any });
+
+                // Broadcast to all connected web clients in real time!
+                broadcastEvent('soundboard_played', {
+                    soundName,
+                    displayName: finalDisplayName,
+                    userName: effectiveName,
+                    userId
+                });
+
                 res.status(200).json({ success: true, message: `Playing ${soundName}` });
             } else {
                 res.status(404).json({ error: 'Sound not found' });
@@ -395,6 +571,7 @@ export function startApiServer(client: YesubassClient) {
         try {
             const buffer = fs.readFileSync(req.file.path);
             const permanentUrl = await uploadSoundPermanently(req.file.filename, buffer, req.file.originalname);
+            broadcastEvent('soundboard_list_updated', { timestamp: Date.now() });
             return res.status(200).json({ 
                 success: true, 
                 filename: req.file.filename,
@@ -402,6 +579,7 @@ export function startApiServer(client: YesubassClient) {
             });
         } catch (uploadErr) {
             logger.error('[API] Error during sound upload persistence:', uploadErr);
+            broadcastEvent('soundboard_list_updated', { timestamp: Date.now() });
             return res.status(200).json({ 
                 success: true, 
                 filename: req.file.filename,
@@ -443,6 +621,7 @@ export function startApiServer(client: YesubassClient) {
             }
 
             soundUrlCache.delete(safeName);
+            broadcastEvent('soundboard_list_updated', { timestamp: Date.now() });
             return res.status(200).json({ success: true });
         } catch (err) {
             logger.error('[API] Failed to delete sound:', err);
@@ -451,30 +630,25 @@ export function startApiServer(client: YesubassClient) {
     });
 
     app.post('/api/music/play', async (req, res) => {
-        const { userId, query } = req.body;
+        const { userId, query, userName } = req.body;
         if (!userId || !query) {
             return res.status(400).json({ error: 'Missing userId or query' });
         }
 
-        let targetVoiceChannelId: string | null = null;
-        let targetGuildId: string | null = null;
+        const resolved = resolveGuildAndPlayer(client, userId);
+        let targetVoiceChannelId = resolved.targetVoiceChannelId;
+        let targetGuildId = resolved.targetGuildId;
+        let player = resolved.player;
 
-        for (const [guildId, guild] of client.guilds.cache) {
-            const member = guild.members.cache.get(userId);
-            if (member && member.voice.channelId) {
-                targetVoiceChannelId = member.voice.channelId;
-                targetGuildId = guildId;
-                break;
-            }
+        if (!targetVoiceChannelId && player) {
+            targetVoiceChannelId = player.voiceChannelId;
         }
 
         if (!targetVoiceChannelId || !targetGuildId) {
-            return res.status(404).json({ error: 'User is not in a voice channel.' });
+            return res.status(404).json({ error: 'User is not in a voice channel and no active player found.' });
         }
 
         try {
-            let player = client.players.get(targetGuildId);
-            
             if (!player) {
                 let joinLock = client.joinLocks.get(targetGuildId);
                 if (!joinLock) {
@@ -484,7 +658,7 @@ export function startApiServer(client: YesubassClient) {
 
                 const unlock = await joinLock.lock();
                 try {
-                    player = client.players.get(targetGuildId);
+                    player = client.players.get(targetGuildId) || null;
                     if (!player) {
                         const node = client.lavalink.shoukaku.options.nodeResolver(client.lavalink.shoukaku.nodes);
                         if (!node) {
@@ -509,13 +683,15 @@ export function startApiServer(client: YesubassClient) {
                 }
             }
 
+            const user = client.users.cache.get(userId) || { id: userId, username: userName || 'Web User' };
+            const requesterObj = { id: userId, username: userName || (user as any).username || 'Friend' };
+
             const cachedTrack = trackCache.get(query) || trackCache.get(query.toLowerCase());
             let trackAdded: any = null;
 
             if (cachedTrack) {
                 trackAdded = cachedTrack;
-                const user = client.users.cache.get(userId) || { id: userId, username: 'Web User' };
-                player.queue.add({ track: cachedTrack, requester: user as any });
+                player.queue.add({ track: cachedTrack, requester: requesterObj as any });
             } else {
                 const node = client.lavalink.shoukaku.options.nodeResolver(client.lavalink.shoukaku.nodes);
                 if (!node) {
@@ -551,14 +727,12 @@ export function startApiServer(client: YesubassClient) {
                     const tracks = result.data.tracks;
                     trackAdded = tracks[0];
                     for (const track of tracks) {
-                        const user = client.users.cache.get(userId) || { id: userId, username: 'Web User' };
-                        player.queue.add({ track, requester: user as any });
+                        player.queue.add({ track, requester: requesterObj as any });
                     }
                 } else if (result.loadType === 'search' || result.loadType === 'track') {
                     const track = result.loadType === 'search' ? result.data[0] : result.data;
                     trackAdded = track;
-                    const user = client.users.cache.get(userId) || { id: userId, username: 'Web User' };
-                    player.queue.add({ track, requester: user as any });
+                    player.queue.add({ track, requester: requesterObj as any });
                 } else {
                     return res.status(404).json({ error: 'No results found.' });
                 }
@@ -567,6 +741,14 @@ export function startApiServer(client: YesubassClient) {
             if (!player.queue.current) {
                 await player.playNext();
             }
+
+            // Real-time broadcast to all connected users
+            broadcastPlayerStatus(client, player);
+            broadcastEvent('track_added', {
+                title: trackAdded?.info?.title || 'Track',
+                author: trackAdded?.info?.author || '',
+                requester: requesterObj.username
+            });
 
             res.status(200).json({ success: true, track: trackAdded?.info?.title || 'Track' });
 
@@ -585,30 +767,9 @@ export function startApiServer(client: YesubassClient) {
             return res.status(400).json({ error: 'Missing userId or action' });
         }
 
-        let targetGuildId: string | null = null;
-        for (const [guildId, guild] of client.guilds.cache) {
-            const member = guild.members.cache.get(userId);
-            if (member && member.voice.channelId) {
-                targetGuildId = guildId;
-                break;
-            }
-        }
+        const resolved = resolveGuildAndPlayer(client, userId);
+        const player = resolved.player;
 
-        // Fallback: If user is not currently in a voice channel, look for any guild where the user is present and bot is playing
-        if (!targetGuildId) {
-            for (const [guildId, guild] of client.guilds.cache) {
-                if (guild.members.cache.has(userId) && client.players.has(guildId)) {
-                    targetGuildId = guildId;
-                    break;
-                }
-            }
-        }
-
-        if (!targetGuildId) {
-            return res.status(404).json({ error: 'User is not in a voice channel or no active bot player found.' });
-        }
-
-        const player = client.players.get(targetGuildId);
         if (!player) {
             return res.status(404).json({ error: 'No active player in this server.' });
         }
@@ -617,9 +778,11 @@ export function startApiServer(client: YesubassClient) {
             switch (action) {
                 case 'pause':
                     await player.player.setPaused(true);
+                    broadcastPlayerStatus(client, player);
                     break;
                 case 'play':
                     await player.player.setPaused(false);
+                    broadcastPlayerStatus(client, player);
                     break;
                 case 'skip_next':
                 case 'skip_prev':
@@ -627,6 +790,7 @@ export function startApiServer(client: YesubassClient) {
                         player.queue.loopTrack = false;
                     }
                     await player.playNext();
+                    broadcastPlayerStatus(client, player);
                     return res.status(200).json({
                         success: true,
                         message: 'Skipped track',
@@ -637,12 +801,14 @@ export function startApiServer(client: YesubassClient) {
                     const vol = parseInt(req.body.value, 10);
                     if (!isNaN(vol) && vol >= 0 && vol <= 100) {
                         await player.player.setGlobalVolume(vol);
+                        broadcastPlayerStatus(client, player);
                     }
                     break;
                 case 'seek':
                     const pos = parseInt(req.body.value, 10);
                     if (!isNaN(pos) && pos >= 0) {
                         await player.player.seekTo(pos);
+                        broadcastPlayerStatus(client, player);
                     }
                     break;
                 case 'stop':
@@ -650,12 +816,14 @@ export function startApiServer(client: YesubassClient) {
                 case 'exit':
                 case 'disconnect':
                     await player.destroy();
+                    broadcastPlayerStatus(client, null);
                     break;
                 case 'remove_queue': {
                     const removeIdx = parseInt(req.body.index ?? req.body.value, 10);
                     if (!isNaN(removeIdx) && removeIdx >= 0 && removeIdx < player.queue.tracks.length) {
                         const removed = player.queue.remove(removeIdx);
                         logger.info(`[API] Removed track at index ${removeIdx}: ${removed?.track?.info?.title}`);
+                        broadcastPlayerStatus(client, player);
                         return res.status(200).json({ success: true, message: `Removed track at index ${removeIdx}` });
                     } else {
                         return res.status(400).json({ error: 'Invalid track index' });
@@ -664,11 +832,13 @@ export function startApiServer(client: YesubassClient) {
                 case 'clear_queue':
                     player.queue.clear();
                     logger.info(`[API] Queue cleared by user ${userId}`);
+                    broadcastPlayerStatus(client, player);
                     return res.status(200).json({ success: true, message: 'Queue cleared' });
                 default:
                     return res.status(400).json({ error: 'Invalid action' });
             }
             logger.info(`[API] Music control request: ${action} by user: ${userId}`);
+            broadcastPlayerStatus(client, player);
             res.status(200).json({ success: true, message: `Action ${action} executed` });
         } catch (error) {
             logger.error(`[API] Failed to execute control action ${action}:`, error);
@@ -682,27 +852,8 @@ export function startApiServer(client: YesubassClient) {
             return res.status(400).json({ error: 'Missing userId or index' });
         }
 
-        let targetGuildId: string | null = null;
-        for (const [guildId, guild] of client.guilds.cache) {
-            const member = guild.members.cache.get(userId);
-            if (member && member.voice.channelId) {
-                targetGuildId = guildId;
-                break;
-            }
-        }
-        if (!targetGuildId) {
-            for (const [guildId, guild] of client.guilds.cache) {
-                if (guild.members.cache.has(userId) && client.players.has(guildId)) {
-                    targetGuildId = guildId;
-                    break;
-                }
-            }
-        }
-        if (!targetGuildId) {
-            return res.status(404).json({ error: 'No active player or voice channel found.' });
-        }
-
-        const player = client.players.get(targetGuildId);
+        const resolved = resolveGuildAndPlayer(client, userId);
+        const player = resolved.player;
         if (!player) {
             return res.status(404).json({ error: 'No active player in this server.' });
         }
@@ -714,6 +865,7 @@ export function startApiServer(client: YesubassClient) {
 
         const removed = player.queue.remove(idx);
         logger.info(`[API] Queue item ${idx} removed: ${removed?.track?.info?.title}`);
+        broadcastPlayerStatus(client, player);
         res.status(200).json({ success: true, removedTitle: removed?.track?.info?.title || 'Track' });
     });
 
@@ -723,33 +875,15 @@ export function startApiServer(client: YesubassClient) {
             return res.status(400).json({ error: 'Missing userId' });
         }
 
-        let targetGuildId: string | null = null;
-        for (const [guildId, guild] of client.guilds.cache) {
-            const member = guild.members.cache.get(userId);
-            if (member && member.voice.channelId) {
-                targetGuildId = guildId;
-                break;
-            }
-        }
-        if (!targetGuildId) {
-            for (const [guildId, guild] of client.guilds.cache) {
-                if (guild.members.cache.has(userId) && client.players.has(guildId)) {
-                    targetGuildId = guildId;
-                    break;
-                }
-            }
-        }
-        if (!targetGuildId) {
-            return res.status(404).json({ error: 'No active player found.' });
-        }
-
-        const player = client.players.get(targetGuildId);
+        const resolved = resolveGuildAndPlayer(client, userId);
+        const player = resolved.player;
         if (!player) {
-            return res.status(404).json({ error: 'No active player.' });
+            return res.status(404).json({ error: 'No active player found.' });
         }
 
         player.queue.clear();
         logger.info(`[API] Queue cleared by user: ${userId}`);
+        broadcastPlayerStatus(client, player);
         res.status(200).json({ success: true, message: 'Queue cleared' });
     });
 
@@ -852,27 +986,17 @@ export function startApiServer(client: YesubassClient) {
             return res.status(400).json({ error: 'Missing userId' });
         }
 
-        let targetGuildId: string | null = null;
-        for (const [guildId, guild] of client.guilds.cache) {
-            const member = guild.members.cache.get(userId);
-            if (member && member.voice.channelId) {
-                targetGuildId = guildId;
-                break;
-            }
-        }
+        const resolved = resolveGuildAndPlayer(client, userId);
+        const player = resolved.player;
 
-        if (!targetGuildId) {
-            return res.status(404).json({ error: 'User is not in a voice channel.' });
-        }
-
-        const player = client.players.get(targetGuildId);
         if (!player) {
             return res.status(404).json({ error: 'No active player in this server.' });
         }
 
         try {
             await player.destroy();
-            logger.info(`[API] Bot kicked by user: ${userId} in guild: ${targetGuildId}`);
+            logger.info(`[API] Bot kicked by user: ${userId}`);
+            broadcastPlayerStatus(client, null);
             res.status(200).json({ success: true, message: 'Disconnected' });
         } catch (error) {
             logger.error(`[API] Failed to kick bot:`, error);
@@ -883,51 +1007,34 @@ export function startApiServer(client: YesubassClient) {
     app.get('/api/music/status', async (req, res) => {
         try {
             const { userId } = req.query;
-            if (!userId || typeof userId !== 'string') {
-                return res.status(400).json({ error: 'Missing userId' });
-            }
+            const resolved = resolveGuildAndPlayer(client, typeof userId === 'string' ? userId : undefined);
+            const player = resolved.player;
 
-            let targetGuildId: string | null = null;
-            for (const [guildId, guild] of client.guilds.cache) {
-                const member = guild.members.cache.get(userId);
-                if (member && member.voice.channelId) {
-                    targetGuildId = guildId;
-                    break;
-                }
-            }
-
-            if (!targetGuildId) {
-                for (const [guildId, guild] of client.guilds.cache) {
-                    if (guild.members.cache.has(userId) && client.players.has(guildId)) {
-                        targetGuildId = guildId;
-                        break;
-                    }
-                }
-            }
-
-            if (!targetGuildId) {
-                return res.status(200).json({ isPlaying: false, currentTrack: 'Not in a voice channel', position: 0, duration: 0, queue: [] });
-            }
-
-            const player = client.players.get(targetGuildId);
-            if (!player || !player.queue.current) {
+            if (!player || (!player.queue.current && player.queue.tracks.length === 0)) {
                 return res.status(200).json({ isPlaying: false, currentTrack: 'No track playing', position: 0, duration: 0, queue: [] });
             }
 
-            const upcomingQueue = player.queue.tracks.slice(0, 25).map((q, idx) => ({
+            const upcomingQueue = player.queue.tracks.slice(0, 50).map((q, idx) => ({
                 index: idx,
                 title: q?.track?.info?.title || 'Unknown',
                 author: q?.track?.info?.author || 'Unknown',
                 uri: q?.track?.info?.uri || '',
-                duration: q?.track?.info?.length || 0
+                duration: q?.track?.info?.length || 0,
+                requester: q?.requester?.username || (q?.requester as any)?.name || 'Friend'
             }));
 
             res.status(200).json({
-                isPlaying: !player.player.paused,
-                currentTrack: player.queue.current?.track?.info?.title || 'Unknown Track',
+                isPlaying: !player.player.paused && !player.isPlayingSoundboard,
+                currentTrack: player.isPlayingSoundboard 
+                    ? (player.soundboardSavedState?.track?.track?.info?.title || 'Soundboard Effect')
+                    : (player.queue.current?.track?.info?.title || 'No track playing'),
                 volume: player.player.filters?.volume ?? 100, // fallback for volume
-                position: player.player.position,
-                duration: player.queue.current?.track?.info?.length || 0,
+                position: player.isPlayingSoundboard 
+                    ? (player.soundboardSavedState?.position || 0)
+                    : (player.player.position || 0),
+                duration: player.isPlayingSoundboard
+                    ? (player.soundboardSavedState?.track?.track?.info?.length || 0)
+                    : (player.queue.current?.track?.info?.length || 0),
                 queue: upcomingQueue
             });
         } catch (error) {

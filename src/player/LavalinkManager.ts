@@ -22,7 +22,10 @@ export class LavalinkManager {
             reconnectTries: 10,
             restTimeout: 15000,
             nodeResolver: (nodesMap) => {
-                const nodesArray = Array.from(nodesMap.values());
+                let nodesArray = Array.from(nodesMap.values());
+                if (nodesArray.length === 0 && this.nodeReferences.size > 0) {
+                    nodesArray = Array.from(this.nodeReferences.values());
+                }
                 if (nodesArray.length === 0) {
                     logger.warn('nodeResolver: Returning undefined because no nodes are configured in Shoukaku.');
                     return undefined;

@@ -18,6 +18,8 @@ export class YesubassPlayer {
     public lastPosition: number = 0;
     public needsRecovery: boolean = false;
     private isRecovering: boolean = false;
+    public soundboardSavedState: { track: QueuedTrack; position: number } | null = null;
+    public isPlayingSoundboard: boolean = false;
 
     constructor(client: YesubassClient, player: Player, guildId: string, textChannelId: string, voiceChannelId: string) {
         this.client = client;
@@ -34,7 +36,10 @@ export class YesubassPlayer {
         this.player.on('start', () => {
             if (this.queue.current) {
                 logger.info(`Started playing in ${this.guildId}`);
-                this.sendNowPlaying();
+                if (!this.isPlayingSoundboard) {
+                    this.sendNowPlaying();
+                }
+                this.client.emit('playerUpdate', this);
             }
         });
 
@@ -50,6 +55,34 @@ export class YesubassPlayer {
                 return;
             }
 
+            // Handle soundboard interrupt resume
+            if (this.isPlayingSoundboard) {
+                this.isPlayingSoundboard = false;
+                if (this.soundboardSavedState) {
+                    const saved = this.soundboardSavedState;
+                    this.soundboardSavedState = null;
+                    this.queue.current = saved.track;
+                    this.lastPosition = saved.position;
+                    logger.info(`[Soundboard] Resuming previous track at ${saved.position}ms in ${this.guildId}`);
+                    try {
+                        await this.player.playTrack({ 
+                            track: { encoded: saved.track.track.encoded },
+                            position: saved.position
+                        });
+                    } catch (e) {
+                        logger.error('[Soundboard] Failed to resume track after soundboard:', e);
+                    }
+                    this.client.emit('playerUpdate', this);
+                    return;
+                } else {
+                    this.queue.current = null;
+                    this.lastPosition = 0;
+                    await this.playNext();
+                    this.client.emit('playerUpdate', this);
+                    return;
+                }
+            }
+
             if (this.queue.loopTrack && this.queue.current) {
                 this.playTrack(this.queue.current);
                 return;
@@ -62,11 +95,19 @@ export class YesubassPlayer {
             this.queue.current = null;
             this.lastPosition = 0;
             await this.playNext();
+            this.client.emit('playerUpdate', this);
         });
 
         this.player.on('closed', (_data: any) => {
-            logger.warn(`Player closed in ${this.guildId}`, _data);
+            logger.warn(`Player closed event in ${this.guildId}:`, _data);
             
+            // Discord Voice Code 4014: Channel move, region handover, or server routing.
+            // Do NOT destroy the player because Discord is maintaining/switching the connection!
+            if (_data && _data.code === 4014) {
+                logger.info(`Voice region / handover event 4014 in ${this.guildId}. Keeping player alive.`);
+                return;
+            }
+
             // Only preserve if it's a confirmed Lavalink issue (abnormal closure)
             const isLavalinkIssue = _data && (_data.code === 1006 || _data.reason === 'Node disconnected');
             
@@ -76,20 +117,46 @@ export class YesubassPlayer {
                 return;
             }
 
-            this.destroy();
+            // Only destroy if the bot is actually no longer in any voice channel in this guild
+            const me = this.client.guilds.cache.get(this.guildId)?.members.me;
+            if (!me?.voice?.channelId) {
+                logger.info(`Bot is confirmed disconnected from voice in ${this.guildId}. Destroying player.`);
+                this.destroy();
+            } else {
+                logger.info(`Bot is still in voice channel ${me.voice.channelId} in ${this.guildId}. Ignoring closed event.`);
+            }
         });
 
         this.player.on('exception', (_data) => {
             logger.error(`Player exception in ${this.guildId}`, _data);
             this.sendMessage('⚠️ **Error:** An exception occurred while playing the track.');
             this.playNext();
+            this.client.emit('playerUpdate', this);
         });
     }
 
     public async playTrack(queuedTrack: QueuedTrack) {
+        this.isPlayingSoundboard = false;
+        this.soundboardSavedState = null;
         this.queue.current = queuedTrack;
         this.lastPosition = 0;
         await this.player.playTrack({ track: { encoded: queuedTrack.track.encoded } });
+        this.client.emit('playerUpdate', this);
+    }
+
+    public async playSoundboard(queuedTrack: QueuedTrack) {
+        // If currently playing a music track and not already playing soundboard, save state to resume seamlessly
+        if (this.queue.current && !this.isPlayingSoundboard) {
+            this.soundboardSavedState = {
+                track: this.queue.current,
+                position: this.lastPosition || this.player.position || 0
+            };
+        }
+        this.isPlayingSoundboard = true;
+        this.queue.current = queuedTrack;
+        this.lastPosition = 0;
+        await this.player.playTrack({ track: { encoded: queuedTrack.track.encoded } });
+        this.client.emit('playerUpdate', this);
     }
 
     public async playNext() {
@@ -103,6 +170,7 @@ export class YesubassPlayer {
                 this.lastPosition = 0;
                 await this.player.stopTrack();
                 this.sendMessage('Queue ended. Add more songs to keep the party going!');
+                this.client.emit('playerUpdate', this);
             }
         } catch (err) {
             logger.error(`Error in playNext for ${this.guildId}`, err);
@@ -116,16 +184,20 @@ export class YesubassPlayer {
                 this.lastPosition = 0;
                 await this.player.stopTrack();
             }
+            this.client.emit('playerUpdate', this);
         } finally {
             unlock();
         }
     }
 
     public async destroy() {
+        this.soundboardSavedState = null;
+        this.isPlayingSoundboard = false;
         this.queue.clear();
         this.lastPosition = 0;
         await this.client.lavalink.shoukaku.leaveVoiceChannel(this.guildId);
         this.client.players.delete(this.guildId);
+        this.client.emit('playerUpdate', this);
     }
 
     public async recover() {

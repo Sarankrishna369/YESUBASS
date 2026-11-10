@@ -29,15 +29,14 @@ const _logger = winston.createLogger({
     ],
 });
 
-if (process.env.NODE_ENV !== 'production') {
-    _logger.add(new winston.transports.Console({
-        format: combine(
-            colorize(),
-            timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
-            myFormat
-        )
-    }));
-}
+// Always enable Console output so logs appear on Render / cloud providers
+_logger.add(new winston.transports.Console({
+    format: combine(
+        colorize(),
+        timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
+        myFormat
+    )
+}));
 
 export const logger = {
     info: (message: string, ...args: any[]) => _logger.info(message, ...args),
